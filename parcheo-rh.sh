@@ -1,79 +1,50 @@
 #!/bin/bash
-# parcheo-rh.sh - Parcheo automatico para Red Hat 8+
-# Uso: ejecutar como root o con sudo
+# parcheo-rh.sh - Parcheo automático para Red Hat / CentOS / Rocky / AlmaLinux
+# Compatible con RHEL 8+, CentOS Stream 8+, Rocky Linux 8+, AlmaLinux 8+
 
-LOG=$(mktemp)
-REBOOT_NEEDED=false
-HOSTNAME=$(hostname)
-FECHA=$(date '+%Y-%m-%d %H:%M')
+set -euo pipefail
 
-echo "=== Parcheo VM: $HOSTNAME ===" > "$LOG"
-echo "Fecha: $FECHA" >> "$LOG"
-echo "" >> "$LOG"
+LOG="/var/log/parcheo-rh.log"
+DATE=$(date '+%Y-%m-%d %H:%M:%S')
 
-# Actualizar lista de paquetes
-echo ">>> dnf check-update..." >> "$LOG"
-dnf check-update >> "$LOG" 2>&1
-CHECK_EXIT=$?
+log() {
+    echo "[$DATE] $1" | tee -a "$LOG"
+}
 
-# 0 = sin updates, 100 = hay updates, otro = error
-if [ $CHECK_EXIT -eq 0 ]; then
-    echo "" >> "$LOG"
-    echo "No hay paquetes pendientes de actualizar." >> "$LOG"
-    PARCHES_APLICADOS=false
-elif [ $CHECK_EXIT -eq 100 ]; then
-    echo "" >> "$LOG"
-    echo ">>> Aplicando actualizaciones..." >> "$LOG"
-    dnf upgrade -y >> "$LOG" 2>&1
-    if [ $? -eq 0 ]; then
-        echo "Actualizaciones aplicadas correctamente." >> "$LOG"
-        PARCHES_APLICADOS=true
+log "=== Inicio de parcheo ==="
+
+# Comprobar si hay actualizaciones disponibles
+# dnf check-update devuelve 100 si hay updates, 0 si no hay, otro código si error
+log "Comprobando actualizaciones disponibles..."
+dnf check-update -q 2>&1 | tee -a "$LOG" || true
+EXIT_CODE=${PIPESTATUS[0]}
+
+if [ "$EXIT_CODE" -eq 100 ]; then
+    log "Hay actualizaciones disponibles. Aplicando..."
+    dnf upgrade -y 2>&1 | tee -a "$LOG"
+    log "Actualizaciones aplicadas correctamente."
+elif [ "$EXIT_CODE" -eq 0 ]; then
+    log "El sistema ya está al día. No hay nada que actualizar."
+else
+    log "ERROR: dnf check-update devolvió código $EXIT_CODE"
+    exit 1
+fi
+
+# Limpieza de paquetes huérfanos y caché
+log "Limpiando paquetes obsoletos..."
+dnf autoremove -y 2>&1 | tee -a "$LOG"
+dnf clean all 2>&1 | tee -a "$LOG"
+log "Limpieza completada."
+
+# Comprobar si se necesita reinicio (requiere dnf-utils)
+if command -v needs-restarting &>/dev/null; then
+    if ! needs-restarting -r &>/dev/null; then
+        log "AVISO: Se requiere reinicio del sistema para aplicar todos los cambios."
     else
-        echo "ERROR al aplicar actualizaciones." >> "$LOG"
-        PARCHES_APLICADOS=false
+        log "No se necesita reinicio."
     fi
 else
-    echo "ERROR ejecutando dnf check-update (exit code: $CHECK_EXIT)" >> "$LOG"
-    PARCHES_APLICADOS=false
+    log "needs-restarting no disponible. Instala dnf-utils para detección de reinicio."
 fi
 
-# Limpieza de paquetes huerfanos
-echo "" >> "$LOG"
-echo ">>> Limpieza de paquetes no necesarios..." >> "$LOG"
-dnf autoremove -y >> "$LOG" 2>&1
-
-# Limpiar cache de dnf
-echo "" >> "$LOG"
-echo ">>> Limpiando cache de dnf..." >> "$LOG"
-dnf clean all >> "$LOG" 2>&1
-
-# Comprobar si necesita reinicio
-if needs-restarting -r >> /dev/null 2>&1; then
-    REBOOT_NEEDED=false
-    echo "" >> "$LOG"
-    echo "Reinicio: NO necesario." >> "$LOG"
-else
-    REBOOT_NEEDED=true
-    echo "" >> "$LOG"
-    echo "Reinicio: NECESARIO (hay kernel o servicios criticos actualizados)." >> "$LOG"
-fi
-
-# Resumen para el correo
-echo "" >> "$LOG"
-echo "=== RESUMEN ===" >> "$LOG"
-echo "Host: $HOSTNAME" >> "$LOG"
-echo "Fecha: $FECHA" >> "$LOG"
-echo "Parches aplicados: $PARCHES_APLICADOS" >> "$LOG"
-echo "Reinicio necesario: $REBOOT_NEEDED" >> "$LOG"
-
-# Enviar correo con el resultado
-ASUNTO="[Parcheo RH] $HOSTNAME - $FECHA"
-cat "$LOG" | msmtp arachiriwoki@gmail.com -s "$ASUNTO" -- \
-    || (echo "To: arachiriwoki@gmail.com
-Subject: $ASUNTO
-
-$(cat $LOG)" | msmtp arachiriwoki@gmail.com)
-
-# Mostrar log por pantalla tambien
-cat "$LOG"
-rm -f "$LOG"
+log "=== Fin de parcheo ==="
